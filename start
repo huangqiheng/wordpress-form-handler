@@ -1,0 +1,4 @@
+#!/bin/sh
+
+$PWD/form-report-worker
+$PWD/form-report-client
