@@ -31,16 +31,16 @@ wordpress-form-handler
 
 1、在nginx.conf的http中填入：
 
-        log_format form_tracking '{'
-                '"time_local" : "$time_local", '
-                '"server_name" : "$server_name", '
-                '"request_uri" : "$request_uri", '
-                '"http_referer" : "$http_referer", '
-                '"status" : $status, '
-                '"request_length" : $request_length, '
-                '"http_cookie" : "$http_cookie", '
-                '"request_body" : "$request_body"'
-                '}';
+	log_format form_tracking '{'
+		'"time_local" : "$time_local", '
+		'"server_name" : "$server_name", '
+		'"request_uri" : "$request_uri", '
+		'"http_referer" : "$http_referer", '
+		'"status" : $status, '
+		'"request_length" : $request_length, '
+		'"http_cookie" : "$http_cookie", '
+		'"request_body" : "$request_body"'
+	'}';
 
 2、在nginx.conf所在目录中，新创建以下内容的文件：
 
@@ -69,13 +69,13 @@ wordpress-form-handler
 
 3、然后在各server中，改写php的location中新添一行：
 
-        location ~ \.php$ {
-                try_files $uri =404;
-                fastcgi_split_path_info ^(.+\.php)(/.+)$;
-                fastcgi_pass unix:/var/run/php5-fpm-appgame.sock;
-                fastcgi_index index.php;
-                include fastcgi_params;
-		#这是新添的一行
-                include form_log_patch;
-        }
+	location ~ \.php$ {
+		try_files $uri =404;
+		fastcgi_split_path_info ^(.+\.php)(/.+)$;
+		fastcgi_pass unix:/var/run/php5-fpm-appgame.sock;
+		fastcgi_index index.php;
+		include fastcgi_params;
+		#这是新添的一行，包含上面新建的文件
+		include form_log_patch;
+	}
 
