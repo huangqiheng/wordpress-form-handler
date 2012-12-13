@@ -1,0 +1,167 @@
+#!/usr/bin/env ruby
+#encoding: utf-8
+
+require 'yaml'
+require 'xmlrpc/client'
+require 'set'
+require 'optparse'
+
+=begin 
+=================================================================
+	获取命令行参数
+=================================================================
+=end
+
+options = {}
+
+banner_str = <<end_of_banner
+------------------ 程序说明 -------------------
+通过xml-rpc接口，抓取wordpress指定时间段的文章存于mysql中。
+可以设定2中不同的抓取方式：
+	1）定步长方式。设定起点和步长，强制更新文章内容，包括被修改的文章。
+	2）定时长方式。设定距离最近的时间，或者只更新未更新过的。注意，如果只更新未更新过的，那些修改过的文章，会不在更新的范围。
+
+------------------ 命令行说明 ---------------------
+end_of_banner
+
+option_parser = OptionParser.new do |opts|
+	opts.banner = banner_str	
+	options[:order] = 'dasc'
+	options[:offset] = 0
+	options[:step] = 100
+	options[:time] = 0
+
+	title = '设置按发布时间的排序方式，asc或者dasc，默认为dasc显示最新的'
+	opts.on('-o ORDER', '--order Order', title) do |value|
+		options[:order] = value
+	end
+
+	title = '设置抓取的起点偏移值，默认为0'
+	opts.on('-f OFFSET', '--offset Offset', title) do |value|
+		options[:offset] = value
+	end
+
+	title = '设置一次抓取的个数，默认为100'
+	opts.on('-s STEP', '--step Step', title) do |value|
+		options[:step] = value
+	end
+
+	title = '默认为0，禁止时长方式；-1，只抓新发布的；>0，抓最新几个小时的'
+	opts.on('-t TIME', '--time Time', title) do |value|
+		options[:time] = value
+	end
+end.parse!
+
+=begin 
+=================================================================
+	读取配置文件
+=================================================================
+=end
+
+config = YAML.load_file 'config.yml'
+wp_config = config['wordpress']
+db_config = config['database']
+
+unless wp_config
+	puts 'wordpress配置未配置，请检查config.yml.'
+	raise 'config_error'
+end
+
+unless db_config
+	puts 'mysql配置有误，请检查config.yml.'
+	raise 'config_error'
+end
+
+xmlrpcurl = wp_config['url']
+username = wp_config['username']
+password = wp_config['password']
+
+unless (xmlrpcurl and username and password)
+	puts 'wordpress用户配置有误，请检查config.yml.'
+	raise 'config_error'
+end
+
+=begin 
+=================================================================
+	根据用户名读取blog_id
+=================================================================
+=end
+
+server = XMLRPC::Client.new_from_uri xmlrpcurl
+
+blogid = nil
+admin_blogs = server.call 'wp.getUsersBlogs', username, password
+admin_blogs.each do | blog |
+	if blog['isAdmin']
+		blogid = blog['blogid'] unless blogid
+	end
+end
+
+unless blogid
+	puts "blogid为空，提供的wordpress账户密码不对，请检查config.yml文件."
+	raise 'wordpress_account_error'
+end
+
+
+=begin 
+=================================================================
+	判断文章类型函数
+=================================================================
+=end
+
+$game_evaluation = Set.new ['一星', '二星', '三星', '四星', '五星', '游戏评测']
+$game_guides = Set.new ['热门攻略']
+$game_news = Set.new ['游戏速递', '新游预告']
+
+def get_post_type tags
+	return 'game_evaluation' unless ($game_evaluation & tags).empty?
+	return 'game_guides' unless ($game_guides & tags).empty?
+	return 'game_newgame' unless ($game_news & tags).empty?
+	return 'game_infomation'
+end
+
+=begin 
+=================================================================
+	循环抓取文章
+=================================================================
+=end
+
+OFFSET = options[:offset]
+STEP = options[:step]
+ORDER = options[:order]
+TIME = options[:time]
+
+filter = {'post_status'=>'publish', 'orderby'=>'post_date', 'order'=>ORDER, 'number'=>STEP, 'offset'=>OFFSET}
+fields = ['post_id', 'post_title', 'terms']
+
+index = OFFSET
+loop do
+	filter['offset'] = index 
+	page_list = server.call 'wp.getPosts', blogid, username, password, filter, fields
+
+	count = page_list.length
+	break if count == 0
+
+	page_list.each do | page |
+		postid = page['post_id']
+		posttitle = page['post_title']
+		terms = page['terms']
+		tags = Set.new
+
+		terms.each do | item |
+			if item['taxonomy'] == 'category'
+				tags.add item['name']
+			end
+		end
+
+		op_type = get_post_type tags
+
+		puts "#{index}:\t#{postid}\t#{op_type}\t\t#{posttitle}"
+		index = index.next
+	end
+
+	break if  index >= 300
+
+	break if count < STEP
+end 
+

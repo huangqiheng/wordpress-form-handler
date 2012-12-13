@@ -7,24 +7,33 @@ wordpress-form-handler
 一、安装必须的软件包
 -----------------------------
 
+安装ruby程序环境
+
 	apt-get install ruby ruby-dev
 	apt-get install build-essential
 	apt-get install mysql-server mysql-client
 	apt-get install libmysqlclient-dev
 	apt-get install gearman
 
+安装git代码管理
+
+	apt-get install git
+
 
 二、安装ruby gems
 ----------------------------
 
-	在采集端：
+在采集端：
+
 	gem install gearman-ruby
 
-	在处理端：
+在处理端：
+
 	gem install gearman-ruby
 	gem install wp_rpc
 	gem install mysql2
 	gem install activerecord
+	gem install ruby-fifo
 
 三、配置nginx采集日志
 ----------------------------
@@ -44,10 +53,12 @@ wordpress-form-handler
 
 2、在nginx.conf所在目录中，新创建以下内容的文件：
 
-	#创建这个文件
+创建这个文件
+
 	vim form_log_patch
 
-	#在这个文件中填入如下内容
+在这个文件中填入如下内容
+
 	set $form_flag '';
 	if  ($request_method = POST) {
 		set $form_flag 1$form_flag;
@@ -78,4 +89,42 @@ wordpress-form-handler
 		#这是新添的一行，包含上面新建的文件
 		include form_log_patch;
 	}
+
+
+四、部署
+---------------------------------
+
+1、使用git下载
+
+	git clone git://github.com/huangqiheng/wordpress-form-handler.git
+
+2、编辑配置文件config.yml
+
+	cd wordpress-form-handler
+	vim config.yml
+	
+	添加如下内容，注意前导是空格不是tab：
+	database:
+	  server: 127.0.0.1
+	  username: root
+	  password: ******
+
+	wordpress:
+	  url: http://www.appgame.com/xmlrpc.php
+	  username: admin
+	  password: ******
+
+	appimport:
+	  server: app.appgame.com
+	  username: admin
+	  password: ******
+
+3、运行
+	
+	./start 	#启动运行
+	./stop  	#停止运行
+	./restart	#从新启动
+
+
+
 
