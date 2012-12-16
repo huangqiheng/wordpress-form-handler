@@ -5,6 +5,13 @@ require 'yaml'
 require 'xmlrpc/client'
 require 'set'
 require 'optparse'
+require 'fifo'
+require 'thread'
+require 'net/http'
+require 'uri'
+require 'itunes'
+require 'multi_json'
+require 'nokogiri'
 
 =begin 
 =================================================================
@@ -17,40 +24,33 @@ options = {}
 banner_str = <<end_of_banner
 ------------------ 程序说明 -------------------
 通过xml-rpc接口，抓取wordpress指定时间段的文章存于mysql中。
-可以设定2中不同的抓取方式：
-	1）定步长方式。设定起点和步长，强制更新文章内容，包括被修改的文章。
-	2）定时长方式。设定距离最近的时间，或者只更新未更新过的。注意，如果只更新未更新过的，那些修改过的文章，会不在更新的范围。
 
 ------------------ 命令行说明 ---------------------
 end_of_banner
 
 option_parser = OptionParser.new do |opts|
 	opts.banner = banner_str	
-	options[:order] = 'dasc'
 	options[:offset] = 0
 	options[:step] = 100
-	options[:time] = 0
-
-	title = '设置按发布时间的排序方式，asc或者dasc，默认为dasc显示最新的'
-	opts.on('-o ORDER', '--order Order', title) do |value|
-		options[:order] = value
-	end
+	options[:time] = 48
 
 	title = '设置抓取的起点偏移值，默认为0'
-	opts.on('-f OFFSET', '--offset Offset', title) do |value|
+	opts.on('-f OFFSET', '--offset Offset', Integer, title) do |value|
 		options[:offset] = value
 	end
 
 	title = '设置一次抓取的个数，默认为100'
-	opts.on('-s STEP', '--step Step', title) do |value|
+	opts.on('-s STEP', '--step Step', Integer, title) do |value|
 		options[:step] = value
 	end
 
-	title = '默认为0，禁止时长方式；-1，只抓新发布的；>0，抓最新几个小时的'
-	opts.on('-t TIME', '--time Time', title) do |value|
+	title = '默认为48小时。=0，只抓新数据库中没的；>0，抓最新几个小时的'
+	opts.on('-t TIME', '--time Time', Integer, title) do |value|
 		options[:time] = value
 	end
 end.parse!
+
+
 
 =begin 
 =================================================================
@@ -81,6 +81,8 @@ unless (xmlrpcurl and username and password)
 	raise 'config_error'
 end
 
+
+
 =begin 
 =================================================================
 	根据用户名读取blog_id
@@ -103,6 +105,7 @@ unless blogid
 end
 
 
+
 =begin 
 =================================================================
 	判断文章类型函数
@@ -113,12 +116,279 @@ $game_evaluation = Set.new ['一星', '二星', '三星', '四星', '五星', '�
 $game_guides = Set.new ['热门攻略']
 $game_news = Set.new ['游戏速递', '新游预告']
 
-def get_post_type tags
-	return 'game_evaluation' unless ($game_evaluation & tags).empty?
-	return 'game_guides' unless ($game_guides & tags).empty?
-	return 'game_newgame' unless ($game_news & tags).empty?
-	return 'game_infomation'
+def get_post_type tags_array
+	tags = Set.new tags_array
+	return 'saveevaluations' unless ($game_evaluation & tags).empty?
+	return 'saveexplain' unless ($game_guides & tags).empty?
+	return 'savenewgame' unless ($game_news & tags).empty?
+	return nil
 end
+
+def get_tags terms
+	tags = Array.new
+	terms.each do | item |
+		if item['taxonomy'] == 'category'
+			tags << item['name']
+		end
+	end
+	tags
+end
+
+=begin 
+=================================================================
+	分发内容到其他内容合作系统
+=================================================================
+=end
+
+def get_access
+	Net::HTTP.get(URI.parse('http://app.appgame.com/manage/ajax/News.ashx?op=getaccess'))
+end
+
+def post_article params
+	uri = URI.parse('http://app.appgame.com/manage/ajax/News.ashx')
+	http = Net::HTTP.new uri.host, uri.port
+	http.set_debug_output($stdout)
+	request = Net::HTTP::Post.new uri.request_uri
+	request.set_form_data params
+	response = http.request request
+	response.body
+end
+
+=begin
+def post_article params
+	respone = Net::HTTP.post_form(URI.parse('http://app.appgame.com/manage/ajax/News.ashx'), params)
+	respone.body
+end
+=end
+
+def post_login
+	params ={
+'__VIEWSTATE'=>'/wEPDwUJOTc0MzMyNzIxZGSF7SSjOMCL0DJ8YH/rEr9twoqaQHMNPKsCb1VMadmKFw==',
+'__EVENTVALIDATION'=>'/wEWBAKgmqOiAgKvpuq2CALyveCRDwKmwImNC2V6FFmfu1uy02E9QBjiwm6GP+FAB5kxZhYSzlmHGGG6',
+'op'=>'login',
+'username'=>'admin',
+'password'=>'rwt',
+'ctl05'=>'确定'}
+	respone = Net::HTTP.post_form(URI.parse('http://app.appgame.com/login.aspx'), params)
+	respone.body
+end
+
+def lookup_itunes app_id, country
+	itunes = ITunes::Client.new
+	result = itunes.lookup(app_id, {'country'=>country})
+	result
+end
+
+def get_score tags
+	return 1 if tags.index '一星'
+	return 2 if tags.index '二星'
+	return 3 if tags.index '三星'
+	return 4 if tags.index '四星'
+	return 5 if tags.index '五星'
+	return 0
+end
+
+def kilo n
+	count = 0
+	while  n >= 1024 and count < 4
+		n /= 1024.0
+		count += 1
+	end
+	format("%.2f",n) + %w(B KB MB GB TB)[count]
+end
+
+def get_node_obj elmt
+	result = Array.new
+
+	if elmt.text? 
+		txt = elmt.text
+		txt.split("\n").each do |line|
+			if line != ''
+				result << {'type'=>'word', 'word'=>line, 'icon_url'=>''}
+			end
+		end
+	elsif elmt.name == 'img'
+		result << {'type'=>'pic', 'word'=>'', 'icon_url'=>elmt.get_attribute('src')}
+	end
+	result
+end
+
+def format_content content
+	doc = Nokogiri::HTML content
+	body = doc.css('body').first 
+
+	result = Array.new
+
+	body.children.each do |elmt|
+		new_obj = get_node_obj elmt
+		if new_obj.length == 0
+			elmt.children.each do |elmt2|
+				new_obj = get_node_obj elmt2
+			end
+		end
+
+		result.concat new_obj
+	end
+	
+	MultiJson.dump result
+end
+
+def ge_short_content content
+	doc = Nokogiri::HTML content
+	body = doc.css('body').first 
+
+	result = Array.new
+
+	body.children.each do |elmt|
+		if elmt.text?
+			result << elmt.text
+		elsif elmt.name == 'p'
+			result << elmt.text
+		end
+	end
+	result.join
+end
+
+def get_content content
+	result = URI::encode content
+	puts result
+	result
+end
+		
+def get_params_obj page,target_id
+	td = Time.now
+	pd = page['post_date'].to_time
+	content = page['post_content']
+	tags = get_tags page['terms']
+	op_type = get_post_type tags
+	return nil unless op_type
+
+	#获取文章中的itunes链接
+	md = content.match /src=\"http:\/\/www.appgame.com\/itunes_js.php\?id=(\d+)&country=(\S+)\"/i
+	return nil unless md
+	id = md[1]
+	country = md[2]
+
+	#获取苹果商店中的app信息
+	lookup_result = lookup_itunes id, country
+	return nil unless lookup_result
+	return nil unless lookup_result.result_count
+	app = lookup_result.results[0]
+	return nil unless app
+
+	result = Hash.new
+	result['op'] = op_type
+	result['id'] = target_id
+	result['md'] = "#{td.year}-#{td.month}-#{td.day} #{td.hour}:#{td.min}:#{td.sec}"
+	result['maintitle'] = page['post_title']
+	result['subtitle'] = ''
+	result['istop'] = false
+	result['pid'] = -1
+	result['subtype'] = tags.join(',')
+	result['shotcontent'] = ge_short_content page['post_excerpt']
+	result['content'] = get_content content
+	result['content2'] = format_content content
+	result['sharepoints'] = 1
+	result['commentpoints'] = 1
+	result['publishdt'] = "#{pd.year}-#{pd.month}-#{pd.day} #{pd.hour}:#{pd.min}:#{pd.sec}"
+	result['score'] = get_score tags
+
+	result['video'] = ''
+	result['picture'] = ''
+	result['icon'] = app.artwork_url60
+	result['appname'] = app.track_name
+	result['device'] = app.supported_devices.join(',')
+	result['size'] = kilo app.file_size_bytes.to_i
+	result['company'] = app.seller_name
+	result['price'] = app.formatted_price
+	result['classes'] = app.genres.join(',')
+	result['downloadlink'] = app.track_view_url
+	result
+end
+
+
+$debug_flag = false
+$run_once = false
+
+def handle_one_task task
+	server = task[:server]
+	counter = task[:counter]
+	tags = task[:category]
+
+	return if $debug_flag
+
+	if get_post_type tags
+		page = server.call 'wp.getPost',task[:blogid],task[:username],task[:password],task[:post_id]
+
+		#新建一篇文章
+		params = get_params_obj page,-1
+
+		if params 
+			unless $run_once
+				#puts post_login
+				puts get_access
+				$run_once = true
+			end
+		
+			respone = post_article params
+			puts respone
+
+			$debug_flag = true
+		end
+	end
+end
+
+=begin
+================================================================
+	创建一个队列异步处理，在海量任务时能节约内存
+=================================================================
+=end
+
+run_path = File.dirname(File.expand_path(__FILE__))
+$queue_file = "#{run_path}/task-queue"
+QUEUE_DONE = "The-dequeue-thread-must-be-finished!\n"
+
+def clear_empty_file file_name
+	loop do	
+		break unless File.exist? file_name
+		break if File.size? file_name
+		File.unlink file_name
+		break
+	end 
+end
+
+def raise_exit message
+	clear_empty_file $queue_file
+	raise message
+end
+
+def normal_exit
+	clear_empty_file $queue_file
+	exit 0
+end
+
+enqueue = Fifo.new($queue_file, :w, :nowait)
+dequeue = Fifo.new($queue_file, :r, :wait)
+task_thread = Thread.new() do 
+	counter = 0
+	loop do
+		line = dequeue.readline
+		counter = counter.next
+		break if line == QUEUE_DONE
+
+		task = MultiJson.load(line, :symbolize_keys=>true)
+		task[:counter] = counter
+		task[:server] = server
+		task[:username] = username
+		task[:password] = password
+		task[:blogid] = blogid
+
+		handle_one_task task
+	end
+	clear_empty_file $queue_file
+	puts 'thread end!'
+end
+
 
 =begin 
 =================================================================
@@ -128,40 +398,50 @@ end
 
 OFFSET = options[:offset]
 STEP = options[:step]
-ORDER = options[:order]
 TIME = options[:time]
 
-filter = {'post_status'=>'publish', 'orderby'=>'post_date', 'order'=>ORDER, 'number'=>STEP, 'offset'=>OFFSET}
-fields = ['post_id', 'post_title', 'terms']
+filter = {'post_status'=>'publish', 'orderby'=>'post_date', 'order'=>'dasc', 'number'=>STEP, 'offset'=>OFFSET}
+fields = ['post_id', 'post_title', 'post_date', 'terms']
 
-index = OFFSET
+time_zero = Time.utc(0)
+max_hour = ((Time.now - time_zero) / 3600).to_i
+hour_point = (max_hour-TIME)>0 ? TIME : max_hour
+time_point = (hour_point>0) ? Time.now - (hour_point*60*60) : time_zero
+is_complete = false
+
+
 loop do
-	filter['offset'] = index 
 	page_list = server.call 'wp.getPosts', blogid, username, password, filter, fields
 
 	count = page_list.length
 	break if count == 0
 
+	tasks = Array.new
 	page_list.each do | page |
-		postid = page['post_id']
-		posttitle = page['post_title']
-		terms = page['terms']
-		tags = Set.new
+		postdate = page['post_date'].to_time
 
-		terms.each do | item |
-			if item['taxonomy'] == 'category'
-				tags.add item['name']
-			end
+		#判断时间，是否已经完成任务
+		if (postdate <=> time_point) == 1
+			#处理分类标签
+			tags = get_tags page['terms']
+
+			#压入处理队列中
+			postid = page['post_id']
+			posttitle = page['post_title']
+			task = {'post_date'=>postdate.to_s, 'post_id'=>postid, 'post_title'=>posttitle, 'category'=>tags}
+			tasks << MultiJson.dump(task)
+		else
+			is_complete = true
+			break
 		end
-
-		op_type = get_post_type tags
-
-		puts "#{index}:\t#{postid}\t#{op_type}\t\t#{posttitle}"
-		index = index.next
 	end
 
-	break if  index >= 300
+	enqueue.puts *tasks
 
+	break if is_complete
 	break if count < STEP
+	filter['offset'] = filter['offset'] + count
 end 
 
+enqueue.puts QUEUE_DONE
+task_thread.join

@@ -14,6 +14,9 @@ wordpress-form-handler
 	apt-get install mysql-server mysql-client
 	apt-get install libmysqlclient-dev
 	apt-get install gearman
+	apt-get install libxml2 libxml2-dev
+	apt-get install libxslt1-dev
+
 
 安装git代码管理
 
@@ -30,10 +33,11 @@ wordpress-form-handler
 在处理端：
 
 	gem install gearman-ruby
-	gem install wp_rpc
 	gem install mysql2
 	gem install activerecord
 	gem install ruby-fifo
+	gem install nokogiri
+
 
 三、配置nginx采集日志
 ----------------------------
@@ -94,11 +98,15 @@ wordpress-form-handler
 四、部署
 ---------------------------------
 
-1、使用git下载
+1、同步时间
+
+	ntpdate time.nist.gov
+
+2、使用git下载
 
 	git clone git://github.com/huangqiheng/wordpress-form-handler.git
 
-2、编辑配置文件config.yml
+3、编辑配置文件config.yml
 
 	cd wordpress-form-handler
 	vim config.yml
@@ -119,12 +127,9 @@ wordpress-form-handler
 	  username: admin
 	  password: ******
 
-3、运行
+4、运行
 	
 	./start 	#启动运行
 	./stop  	#停止运行
 	./restart	#从新启动
-
-
-
 
